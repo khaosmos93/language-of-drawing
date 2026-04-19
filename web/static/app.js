@@ -7,6 +7,7 @@ import {
   scalarFieldToImageData,
   rgbFieldToImageData,
 } from "./canvasUtils.js";
+import { CORE_BUNDLE } from "./coreBundle.js";
 
 const REP_FILES = [
   "__init__.py", "normalize.py", "io_utils.py", "pipeline.py", "symbolic.py",
@@ -50,6 +51,7 @@ const status = (msg, level = "info") => {
 
 let pyodide = null;
 let coreBasePath = "core";
+let coreLoadMode = "http";
 let weights = ORDER.map(() => 1.0 / ORDER.length);
 let toggles = ORDER.map(() => 1.0);
 const STAGES = [
@@ -87,6 +89,7 @@ function updateDebugPanel() {
     `baseURL: ${appState.baseUrl}`,
     `pathname: ${appState.pathname}`,
     `corePath: ${coreBasePath}`,
+    `coreLoadMode: ${coreLoadMode}`,
     `imageLoaded: ${appState.imageLoaded}`,
     `imageDimensions: ${appState.imageWidth} x ${appState.imageHeight}`,
     `processing: ${appState.processing}`,
@@ -197,13 +200,18 @@ async function resolveCoreBasePath() {
       // try next candidate
     }
   }
-  throw new Error("Could not locate core/ python package. For GitHub Pages deploy, copy core/ next to built index.html.");
+  return null;
+}
+
+function listMissingCoreFiles() {
+  return REP_FILES.filter((rel) => typeof CORE_BUNDLE[rel] !== "string");
 }
 
 async function bootPyodide() {
   setStage("runtime", "active");
   status("Loading Pyodide runtime…");
   coreBasePath = await resolveCoreBasePath();
+  coreLoadMode = coreBasePath ? "http" : "embedded";
   pyodide = await loadPyodide({ indexURL: "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/" });
   setStage("runtime", "done");
   setStage("packages", "active");
@@ -216,8 +224,16 @@ async function bootPyodide() {
   status("Mounting core/ Python package…");
   pyodide.FS.mkdirTree("/home/pyodide/lod/core/representations");
   pyodide.FS.mkdirTree("/home/pyodide/lod/core/reconstruction");
+  if (coreLoadMode === "embedded") {
+    const missing = listMissingCoreFiles();
+    if (missing.length) {
+      throw new Error(`Embedded core bundle incomplete. Missing: ${missing.join(", ")}`);
+    }
+  }
   for (const rel of REP_FILES) {
-    const src = await fetchText(`${coreBasePath}/${rel}`);
+    const src = coreLoadMode === "http"
+      ? await fetchText(`${coreBasePath}/${rel}`)
+      : CORE_BUNDLE[rel];
     pyodide.FS.writeFile(`/home/pyodide/lod/core/${rel}`, src);
   }
   await pyodide.runPythonAsync(`
@@ -238,7 +254,9 @@ REGISTRY = R.REGISTRY
 print("[pyodide] core ready, ORDER=", ORDER)
 `);
   setStage("core", "done");
-  status("Ready. Pick an image or use the synthetic demo.", "ok");
+  status(coreLoadMode === "embedded"
+    ? "Ready (using embedded core fallback). Pick an image or use the synthetic demo."
+    : "Ready. Pick an image or use the synthetic demo.", "ok");
   updateDebugPanel();
 }
 
