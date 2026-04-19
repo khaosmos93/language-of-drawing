@@ -52,6 +52,22 @@ let pyodide = null;
 let coreBasePath = "core";
 let weights = ORDER.map(() => 1.0 / ORDER.length);
 let toggles = ORDER.map(() => 1.0);
+const STAGES = [
+  { id: "runtime", label: "1) Pyodide runtime boot" },
+  { id: "packages", label: "2) Scientific packages load" },
+  { id: "core", label: "3) core/ Python package mount" },
+  { id: "image", label: "4) Image decode → grayscale/chroma split" },
+  { id: "representations", label: "5) 9 mathematical representations" },
+  { id: "reconstruction", label: "6) Weighted reconstruction" },
+  { id: "symbolic", label: "7) Symbolic basis approximation (optional)" },
+];
+
+function readBaseUrl() {
+  if (typeof import.meta !== "undefined" && import.meta?.env?.BASE_URL) {
+    return import.meta.env.BASE_URL;
+  }
+  return `${window.location.origin}/`;
+}
 
 const appState = {
   imageLoaded: false,
@@ -61,8 +77,9 @@ const appState = {
   fatalError: null,
   reconstructionStatus: "idle",
   repDiagnostics: {},
-  baseUrl: import.meta.env.BASE_URL,
+  baseUrl: readBaseUrl(),
   pathname: window.location.pathname,
+  stages: Object.fromEntries(STAGES.map((s) => [s.id, "pending"])),
 };
 
 function updateDebugPanel() {
@@ -93,6 +110,36 @@ function updateDebugPanel() {
     lines.push(`fatalError: ${appState.fatalError}`);
   }
   $("debugOut").textContent = lines.join("\n");
+}
+
+function setStage(stageId, value) {
+  appState.stages[stageId] = value;
+  const el = document.querySelector(`.procStep[data-stage="${stageId}"]`);
+  if (!el) return;
+  const text = value === "done"
+    ? "done"
+    : value === "active"
+      ? "running"
+      : value === "error"
+        ? "error"
+        : "pending";
+  el.dataset.state = value;
+  const badge = el.querySelector(".state");
+  if (badge) badge.textContent = text;
+}
+
+function buildProcessChecklist() {
+  const container = $("processList");
+  if (!container) return;
+  container.innerHTML = "";
+  STAGES.forEach((stage) => {
+    const li = document.createElement("li");
+    li.className = "procStep";
+    li.dataset.stage = stage.id;
+    li.dataset.state = "pending";
+    li.innerHTML = `<span>${stage.label}</span><span class="state">pending</span>`;
+    container.appendChild(li);
+  });
 }
 
 function setPanelMessage(canvasId, text, kind = "placeholder") {
@@ -130,8 +177,10 @@ async function fetchText(url) {
 }
 
 async function resolveCoreBasePath() {
+  const base = readBaseUrl().replace(/\/$/, "");
   const candidates = [
-    `${import.meta.env.BASE_URL}core`,
+    `${base}/core`,
+    `${window.location.origin}${window.location.pathname.replace(/\/[^/]*$/, "")}/../core`,
     "core",
     "../core",
     "/core",
@@ -152,13 +201,18 @@ async function resolveCoreBasePath() {
 }
 
 async function bootPyodide() {
+  setStage("runtime", "active");
   status("Loading Pyodide runtime…");
   coreBasePath = await resolveCoreBasePath();
   pyodide = await loadPyodide({ indexURL: "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/" });
+  setStage("runtime", "done");
+  setStage("packages", "active");
   status("Loading scientific packages (numpy, scipy, scikit-image, pywavelets, pillow, matplotlib)…");
   await pyodide.loadPackage([
     "numpy", "scipy", "scikit-image", "pywavelets", "pillow", "matplotlib",
   ]);
+  setStage("packages", "done");
+  setStage("core", "active");
   status("Mounting core/ Python package…");
   pyodide.FS.mkdirTree("/home/pyodide/lod/core/representations");
   pyodide.FS.mkdirTree("/home/pyodide/lod/core/reconstruction");
@@ -183,6 +237,7 @@ ORDER = R.ORDER
 REGISTRY = R.REGISTRY
 print("[pyodide] core ready, ORDER=", ORDER)
 `);
+  setStage("core", "done");
   status("Ready. Pick an image or use the synthetic demo.", "ok");
   updateDebugPanel();
 }
@@ -248,6 +303,7 @@ async function loadImageBytes(bytes) {
   }
   setPanelMessage("outCanvas", "Processing...");
   try {
+    setStage("image", "active");
     pyodide.FS.writeFile("/tmp/in.bin", bytes);
     await pyodide.runPythonAsync(`
 import json, traceback
@@ -280,6 +336,8 @@ else:
 
 _diag_json = json.dumps(_diag)
 `);
+    setStage("image", "done");
+    setStage("representations", "active");
 
     const diag = getPyJson("_diag_json");
     appState.repDiagnostics = diag;
@@ -302,14 +360,20 @@ _diag_json = json.dumps(_diag)
       repProxy.destroy?.();
       renderRepresentation(name, rep2d, width, height);
     });
+    setStage("representations", "done");
 
+    setStage("reconstruction", "active");
     await runReconstruction();
+    setStage("reconstruction", "done");
     status("Done.", "ok");
   } catch (e) {
     console.error(e);
     appState.fatalError = e.message;
     status(`Image processing failed: ${e.message}`, "error");
     setPanelMessage("outCanvas", "Error", "error");
+    if (appState.stages.image === "active") setStage("image", "error");
+    if (appState.stages.representations === "active") setStage("representations", "error");
+    if (appState.stages.reconstruction === "active") setStage("reconstruction", "error");
   } finally {
     appState.processing = false;
     updateDebugPanel();
@@ -377,6 +441,7 @@ async function runSymbolic() {
   pyodide.globals.set("_basis", basis);
   pyodide.globals.set("_degree", degree);
   status("Fitting symbolic basis expansion…", "info");
+  setStage("symbolic", "active");
   try {
     await pyodide.runPythonAsync(`
 fit = fit_symbolic(_Y_HAT, basis=_basis, degree=int(_degree), max_k=int(_degree))
@@ -395,11 +460,13 @@ _sym = np.nan_to_num(fit["approx"].astype(np.float32), nan=0.0, posinf=1.0, negi
     const field1d = to1d(sym2d, width, height);
     const { imageData } = scalarFieldToImageData(field1d, width, height);
     drawImageDataToCanvas($("symCanvas"), imageData);
+    setStage("symbolic", "done");
     status("Symbolic expression updated.", "ok");
   } catch (e) {
     console.error(e);
     status(`Symbolic export failed: ${e.message}`, "error");
     setPanelMessage("symCanvas", "Symbolic error", "error");
+    setStage("symbolic", "error");
   }
 }
 
@@ -545,12 +612,16 @@ with open("/tmp/demo.png", "rb") as f:
 }
 
 (async function main() {
+  buildProcessChecklist();
   buildRepControls();
   bindGlobalControls();
   updateDebugPanel();
   try {
     await bootPyodide();
   } catch (e) {
+    if (appState.stages.runtime === "active") setStage("runtime", "error");
+    else if (appState.stages.packages === "active") setStage("packages", "error");
+    else if (appState.stages.core === "active") setStage("core", "error");
     appState.fatalError = e.message;
     status(`Pyodide init failed: ${e.message}`, "error");
     console.error(e);

@@ -16,6 +16,12 @@ h1 { margin: 0; font-size: 22px; letter-spacing: 0.3px; }
 .status { padding: 8px 24px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--warn); }
 .status[data-level="ok"] { color: var(--accent); }
 .status[data-level="error"] { color: var(--error); }
+.processList { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+.procStep { color: var(--muted); display: flex; justify-content: space-between; gap: 10px; font-size: 13px; }
+.procStep .state { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.procStep[data-state="active"] { color: #bfdbfe; }
+.procStep[data-state="done"] { color: var(--accent); }
+.procStep[data-state="error"] { color: var(--error); }
 .row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 0 24px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin: 14px 24px; }
 .row .card { margin: 0; }
