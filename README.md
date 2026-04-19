@@ -83,6 +83,11 @@ VITE_BASE_PATH="/" npm run build
 This creates `dist/` and copies `core/` into `dist/core/`, so Pyodide can fetch the
 Python modules from static hosting.
 
+For environments that serve only `web/` (for example
+`python -m http.server --directory web 8000`), the app now includes an embedded
+fallback copy of the Python `core` package and automatically uses it when
+`/core/__init__.py` is not reachable over HTTP.
+
 ### Notes
 - `vite.config.js` contains the `base` setting and comments for both deployment modes.
 - The app also auto-detects fallback `core/` paths (`base/core`, `core`, `../core`, `/core`) for local/static hosting compatibility.
