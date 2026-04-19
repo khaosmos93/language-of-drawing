@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Language of Drawing — Mathematical Image Transform</title>
+<link rel="stylesheet" href="static/style.css" />
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+</head>
+<body>
+<header>
+  <h1>Language of Drawing</h1>
+  <p class="sub">Image &nbsp;→&nbsp; 9 mathematical representations &nbsp;→&nbsp; reconstruction</p>
+</header>
+
+<section id="status" class="status">Loading Pyodide…</section>
+
+<section class="row">
+  <div class="card">
+    <h2>Input</h2>
+    <input type="file" id="file" accept="image/*" />
+    <button id="useDemo">Use synthetic demo</button>
+    <div class="canvasWrap"><canvas id="inCanvas"></canvas></div>
+  </div>
+  <div class="card">
+    <h2>Reconstruction Î(x,y)</h2>
+    <div class="controls">
+      <label>Strategy
+        <select id="strategy">
+          <option value="linear">A — Linear  Î=Σ wᵢ R̃ᵢ</option>
+          <option value="nonlinear">B — Nonlinear  Î=σ(β Σ wᵢ φᵢ(R̃ᵢ))</option>
+          <option value="pde">C — PDE fusion  ∇²Î = Σ wᵢ Gᵢ</option>
+        </select>
+      </label>
+      <label>β <input type="range" id="beta" min="0.5" max="12" step="0.1" value="4" /><span id="betaV">4.0</span></label>
+      <button id="perturb">Random perturb</button>
+      <button id="reset">Reset weights</button>
+    </div>
+    <div class="canvasWrap"><canvas id="outCanvas"></canvas></div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Representations &nbsp;<small>(toggle &amp; weight each Rᵢ)</small></h2>
+  <div id="reps" class="reps"></div>
+</section>
+
+<section class="card">
+  <h2>Symbolic export &nbsp;<small>Î(x,y) ≈ Σ aₖ ψₖ(x,y)</small></h2>
+  <div class="controls">
+    <label>Basis
+      <select id="basis"><option value="poly">Polynomial</option><option value="fourier">Fourier</option></select>
+    </label>
+    <label>Degree / max-k <input type="number" id="degree" min="2" max="14" value="8" /></label>
+    <button id="symbolic">Compute symbolic approximation</button>
+  </div>
+  <pre id="exprOut" class="expr"></pre>
+  <div class="canvasWrap"><canvas id="symCanvas"></canvas></div>
+</section>
+
+<footer>
+  Math is explicit · no GANs · no diffusion · runs entirely in your browser via
+  <a href="https://pyodide.org" target="_blank" rel="noopener">Pyodide</a>.
+</footer>
+
+<script type="module" src="static/app.js"></script>
+</body>
+</html>
