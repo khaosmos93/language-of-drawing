@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>Language of Drawing — Mathematical Image Transform</title>
-<link rel="stylesheet" href="static/style.css" />
+<link rel="stylesheet" href="./static/style.css" />
 <script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
 </head>
 <body>
@@ -13,7 +13,7 @@
   <p class="sub">Image &nbsp;→&nbsp; 9 mathematical representations &nbsp;→&nbsp; reconstruction</p>
 </header>
 
-<section id="status" class="status">Loading Pyodide…</section>
+<section id="status" class="status" data-level="info">Loading Pyodide…</section>
 
 <section class="row">
   <div class="card">
@@ -58,11 +58,16 @@
   <div class="canvasWrap"><canvas id="symCanvas"></canvas></div>
 </section>
 
+<section class="card debugCard">
+  <h2>Diagnostics</h2>
+  <pre id="debugOut" class="debugOut"></pre>
+</section>
+
 <footer>
   Math is explicit · no GANs · no diffusion · runs entirely in your browser via
   <a href="https://pyodide.org" target="_blank" rel="noopener">Pyodide</a>.
 </footer>
 
-<script type="module" src="static/app.js"></script>
+<script type="module" src="./static/app.js"></script>
 </body>
 </html>

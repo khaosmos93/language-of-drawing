@@ -41,42 +41,53 @@ Color images: the pipeline runs on luminance (Y) only and re-attaches the
 original chroma (CbCr) for output, so the math acts on intensity but the result
 keeps the input's color identity.
 
-## Symbolic export
-
-Approximates `Î(x,y) ≈ Σₖ aₖ ψₖ(x,y)` via least-squares regression onto a
-polynomial or Fourier basis. Writes `out/symbolic.txt` with the top-N terms as a
-human-readable algebraic expression (also exposed in the UI).
-
-## Project layout
-
-```
-core/
-  representations/    # the 9 reps (one file each)
-  reconstruction/     # linear / nonlinear / pde_fusion combiners
-  pipeline.py         # orchestrator
-  symbolic.py         # basis-expansion regression
-  normalize.py        # percentile [0,1]
-  io_utils.py         # Pillow-based load / save / chroma reattach
-  demo_image.py       # synthetic demo generator
-
-run.py                # CLI entry point
-web/                  # static site, deployable to GitHub Pages
-  index.html
-  static/{app.js, style.css}
-.github/workflows/pages.yml   # Pages CI (copies core/ next to web/)
-tests/                # pytest sanity + smoke tests
-```
-
-## Running locally (Codespaces)
+## Running locally (Python CLI)
 
 ```bash
 pip install -r requirements.txt
-python run.py --demo                       # generates data/demo.png and runs
+python run.py --demo
 python run.py --input data/demo.png --out out/
 pytest -q
 ```
 
-Artifacts written under `out/`:
+## Running locally (Web app with Vite)
+
+```bash
+npm install
+npm run dev
+```
+
+Open the printed local URL (usually `http://localhost:5173/`).
+
+### Web debugging behavior
+
+The UI now includes a Diagnostics panel with:
+- upload dimensions and load status
+- representation min/max and NaN counts
+- per-representation failures (fail-soft)
+- reconstruction state
+- `baseURL` and `pathname` to debug GitHub Pages paths
+
+## GitHub Pages deployment
+
+Build once locally:
+
+```bash
+# For project pages: https://<user>.github.io/<repo>/
+VITE_BASE_PATH="/REPO_NAME/" npm run build
+
+# For custom domain/root hosting
+VITE_BASE_PATH="/" npm run build
+```
+
+This creates `dist/` and copies `core/` into `dist/core/`, so Pyodide can fetch the
+Python modules from static hosting.
+
+### Notes
+- `vite.config.js` contains the `base` setting and comments for both deployment modes.
+- The app also auto-detects fallback `core/` paths (`base/core`, `core`, `../core`, `/core`) for local/static hosting compatibility.
+
+## Artifacts written by Python pipeline (`run.py`)
 
 - `rep_<name>.png`  — colorized visualization for each of the 9 representations
 - `field_<name>.png` — raw normalized scalar field
@@ -85,23 +96,6 @@ Artifacts written under `out/`:
 - `recon_*_luma.png` — luminance-only versions
 - `fields.npz` — all 9 normalized fields stacked
 - `symbolic.txt`, `symbolic.npz`, `symbolic_approx.png`
-
-## Web UI
-
-Open `web/index.html` directly (or via any static server). On load, Pyodide
-fetches `core/*.py` and runs the same Python pipeline in your browser. You get:
-
-- file picker + synthetic-demo button
-- live preview of each Rᵢ, with on/off toggles and weight sliders (0–2)
-- strategy selector (linear / nonlinear / PDE), `β` slider for the nonlinear gain
-- random perturb button (`wᵢ += 𝒩(0, 0.2)`)
-- symbolic export panel — choose basis (polynomial / Fourier) and degree
-
-### Deploying to GitHub Pages
-
-The included workflow `.github/workflows/pages.yml` copies `core/` next to
-`web/` and uploads the result to Pages. Enable Pages in repo settings
-(*Settings → Pages → Build from GitHub Actions*) and it deploys on every push.
 
 ## Hard constraints
 

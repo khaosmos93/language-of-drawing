@@ -1,6 +1,12 @@
-// Pyodide-driven UI. Runs the same Python `core/` package in the browser.
-// On GitHub Pages, the CI workflow copies `core/` into `web/core/` so the
-// fetch URLs below resolve.
+import {
+  createSizedCanvas,
+  drawImageDataToCanvas,
+  drawImageToCanvas,
+  fitImageInsideBox,
+  sanitizeNumericArray,
+  scalarFieldToImageData,
+  rgbFieldToImageData,
+} from "./canvasUtils.js";
 
 const REP_FILES = [
   "__init__.py", "normalize.py", "io_utils.py", "pipeline.py", "symbolic.py",
@@ -15,31 +21,107 @@ const REP_FILES = [
   "reconstruction/nonlinear.py", "reconstruction/pde_fusion.py",
 ];
 
-// Order MUST match core/representations/__init__.py::ORDER
 const ORDER = [
   "fourier", "wavelet", "gradient", "levelset", "graph",
   "pde", "probability", "fractal", "manifold",
 ];
+
 const EQS = {
-  fourier:    "F(u,v) = ℱ{I}",
-  wavelet:    "W(s,x,y) = ⟨I,ψ_{s,x,y}⟩",
-  gradient:   "∇I = (∂ₓI, ∂ᵧI)",
-  levelset:   "{φ = c} are level sets of I",
-  graph:      "L = D − W ; Lv = λv",
-  pde:        "∇²I = f(x,y)",
-  probability:"p(I), H_local",
-  fractal:    "D(x,y) = −log N(ε)/log ε",
-  manifold:   "g_ij = G_σ * ∂ᵢI ∂ⱼI",
+  fourier: "F(u,v) = ℱ{I}",
+  wavelet: "W(s,x,y) = ⟨I,ψ_{s,x,y}⟩",
+  gradient: "∇I = (∂ₓI, ∂ᵧI)",
+  levelset: "{φ = c} are level sets of I",
+  graph: "L = D − W ; Lv = λv",
+  pde: "∇²I = f(x,y)",
+  probability: "p(I), H_local",
+  fractal: "D(x,y) = −log N(ε)/log ε",
+  manifold: "g_ij = G_σ * ∂ᵢI ∂ⱼI",
 };
 
+const MAX_UPLOAD_MB = 15;
+const MAX_PREVIEW_BOX = 360;
+
 const $ = (id) => document.getElementById(id);
-const status = (msg) => { $("status").textContent = msg; };
+const status = (msg, level = "info") => {
+  const el = $("status");
+  el.textContent = msg;
+  el.dataset.level = level;
+};
 
 let pyodide = null;
-let fields = null;       // (9,H,W) Float32 — cached after first compute
-let rawCbCr = null;      // saved across reloads
+let coreBasePath = "core";
 let weights = ORDER.map(() => 1.0 / ORDER.length);
 let toggles = ORDER.map(() => 1.0);
+
+const appState = {
+  imageLoaded: false,
+  imageWidth: 0,
+  imageHeight: 0,
+  processing: false,
+  fatalError: null,
+  reconstructionStatus: "idle",
+  repDiagnostics: {},
+  baseUrl: import.meta.env.BASE_URL,
+  pathname: window.location.pathname,
+};
+
+function updateDebugPanel() {
+  const lines = [
+    `baseURL: ${appState.baseUrl}`,
+    `pathname: ${appState.pathname}`,
+    `corePath: ${coreBasePath}`,
+    `imageLoaded: ${appState.imageLoaded}`,
+    `imageDimensions: ${appState.imageWidth} x ${appState.imageHeight}`,
+    `processing: ${appState.processing}`,
+    `reconstruction: ${appState.reconstructionStatus}`,
+  ];
+
+  ORDER.forEach((name) => {
+    const d = appState.repDiagnostics[name];
+    if (!d) {
+      lines.push(`rep:${name} -> not computed`);
+      return;
+    }
+    if (!d.ok) {
+      lines.push(`rep:${name} -> ERROR: ${d.error}`);
+      return;
+    }
+    lines.push(`rep:${name} -> ok min=${d.min.toFixed(4)} max=${d.max.toFixed(4)} nan=${d.nanCount}`);
+  });
+
+  if (appState.fatalError) {
+    lines.push(`fatalError: ${appState.fatalError}`);
+  }
+  $("debugOut").textContent = lines.join("\n");
+}
+
+function setPanelMessage(canvasId, text, kind = "placeholder") {
+  const canvas = $(canvasId);
+  const ctx = createSizedCanvas(canvas, 320, 180);
+  ctx.fillStyle = "#050608";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = kind === "error" ? "#ffb4b4" : "#94a3b8";
+  ctx.font = "16px ui-sans-serif, system-ui";
+  ctx.textAlign = "center";
+  ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+}
+
+function setAllPanelPlaceholders(text) {
+  setPanelMessage("inCanvas", text);
+  setPanelMessage("outCanvas", text);
+  setPanelMessage("symCanvas", text);
+  for (const name of ORDER) {
+    setPanelMessage(`rep-${name}`, text);
+    setRepError(name, "");
+  }
+}
+
+function setRepError(name, message) {
+  const badge = $(`rep-status-${name}`);
+  if (!badge) return;
+  badge.textContent = message;
+  badge.className = message ? "repStatus error" : "repStatus";
+}
 
 async function fetchText(url) {
   const r = await fetch(url, { cache: "no-cache" });
@@ -47,8 +129,31 @@ async function fetchText(url) {
   return r.text();
 }
 
+async function resolveCoreBasePath() {
+  const candidates = [
+    `${import.meta.env.BASE_URL}core`,
+    "core",
+    "../core",
+    "/core",
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    const normalized = candidate.replace(/\/$/, "");
+    try {
+      const response = await fetch(`${normalized}/__init__.py`, { cache: "no-cache" });
+      if (response.ok) {
+        return normalized;
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  throw new Error("Could not locate core/ python package. For GitHub Pages deploy, copy core/ next to built index.html.");
+}
+
 async function bootPyodide() {
   status("Loading Pyodide runtime…");
+  coreBasePath = await resolveCoreBasePath();
   pyodide = await loadPyodide({ indexURL: "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/" });
   status("Loading scientific packages (numpy, scipy, scikit-image, pywavelets, pillow, matplotlib)…");
   await pyodide.loadPackage([
@@ -58,44 +163,64 @@ async function bootPyodide() {
   pyodide.FS.mkdirTree("/home/pyodide/lod/core/representations");
   pyodide.FS.mkdirTree("/home/pyodide/lod/core/reconstruction");
   for (const rel of REP_FILES) {
-    const src = await fetchText(`core/${rel}`);
+    const src = await fetchText(`${coreBasePath}/${rel}`);
     pyodide.FS.writeFile(`/home/pyodide/lod/core/${rel}`, src);
   }
   await pyodide.runPythonAsync(`
+import json
 import sys
+import traceback
 if "/home/pyodide/lod" not in sys.path:
     sys.path.insert(0, "/home/pyodide/lod")
 import core
 import core.representations as R
-import core.reconstruction as C
-from core.io_utils import load_image, reattach_chroma, png_bytes
-from core.normalize import to_uint8
-from core.pipeline import compute_fields, reconstruct
+from core.io_utils import load_image, reattach_chroma
+from core.reconstruction import COMBINERS
 from core.symbolic import fit_symbolic, expression_string
 from core.demo_image import generate_demo
-import numpy as np, io
+import numpy as np
 ORDER = R.ORDER
 REGISTRY = R.REGISTRY
 print("[pyodide] core ready, ORDER=", ORDER)
 `);
-  status("Ready. Pick an image or use the synthetic demo.");
+  status("Ready. Pick an image or use the synthetic demo.", "ok");
+  updateDebugPanel();
 }
 
-// --- canvas helpers ---
-function drawImageBytesTo(canvasId, bytes) {
-  return new Promise((resolve) => {
-    const blob = new Blob([bytes], { type: "image/png" });
-    const url = URL.createObjectURL(blob);
+function to1d(data2d, width, height) {
+  const out = new Float32Array(width * height);
+  let k = 0;
+  for (let y = 0; y < height; y += 1) {
+    const row = data2d[y] || [];
+    for (let x = 0; x < width; x += 1) {
+      out[k] = Number(row[x] ?? 0);
+      k += 1;
+    }
+  }
+  return out;
+}
+
+function getPyJson(name) {
+  const value = pyodide.globals.get(name);
+  const text = value.toString();
+  value.destroy?.();
+  return JSON.parse(text);
+}
+
+async function drawUploadedPreview(file) {
+  const objectUrl = URL.createObjectURL(file);
+  try {
     const img = new Image();
-    img.onload = () => {
-      const c = $(canvasId);
-      c.width = img.width; c.height = img.height;
-      c.getContext("2d").drawImage(img, 0, 0);
-      URL.revokeObjectURL(url);
-      resolve();
-    };
-    img.src = url;
-  });
+    img.src = objectUrl;
+    await img.decode();
+    appState.imageLoaded = true;
+    appState.imageWidth = img.naturalWidth;
+    appState.imageHeight = img.naturalHeight;
+    const fitted = fitImageInsideBox(img.naturalWidth, img.naturalHeight, MAX_PREVIEW_BOX, MAX_PREVIEW_BOX);
+    drawImageToCanvas($("inCanvas"), img, fitted.width, fitted.height);
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
 }
 
 async function imageBytesFromFile(file) {
@@ -103,70 +228,181 @@ async function imageBytesFromFile(file) {
   return new Uint8Array(buf);
 }
 
-// --- pipeline calls ---
+function renderRepresentation(name, field2d, width, height) {
+  const flattened = sanitizeNumericArray(to1d(field2d, width, height));
+  const nanCount = flattened.reduce((acc, v) => acc + (Number.isFinite(v) ? 0 : 1), 0);
+  const { imageData, min, max } = scalarFieldToImageData(flattened, width, height);
+  drawImageDataToCanvas($(`rep-${name}`), imageData);
+  setRepError(name, "");
+  appState.repDiagnostics[name] = { ok: true, min, max, nanCount };
+}
+
 async function loadImageBytes(bytes) {
-  status("Computing 9 mathematical representations…");
-  pyodide.FS.writeFile("/tmp/in.bin", bytes);
-  await pyodide.runPythonAsync(`
-with open("/tmp/in.bin","rb") as f:
+  appState.processing = true;
+  appState.fatalError = null;
+  appState.reconstructionStatus = "processing";
+  updateDebugPanel();
+  status("Computing mathematical representations…", "info");
+  for (const name of ORDER) {
+    setPanelMessage(`rep-${name}`, "Processing...");
+  }
+  setPanelMessage("outCanvas", "Processing...");
+  try {
+    pyodide.FS.writeFile("/tmp/in.bin", bytes);
+    await pyodide.runPythonAsync(`
+import json, traceback
+with open("/tmp/in.bin", "rb") as f:
     _b = f.read()
 Y, CbCr = load_image(_b)
-fields_np, raw = compute_fields(Y)
-_FIELDS = fields_np
-_RAW = raw
-_Y = Y
-_CBCR = CbCr
-_in_png = png_bytes((Y*255+0.5).astype("uint8"))
-_rep_pngs = {n: png_bytes(REGISTRY[n].visualize(raw[n])) for n in ORDER}
+_Y = Y.astype(np.float32)
+_CBCR = CbCr.astype(np.float32)
+_repr = {}
+_diag = {}
+for name in ORDER:
+    try:
+        rep = REGISTRY[name]
+        raw = rep.compute(_Y)
+        field = np.nan_to_num(rep.to_field(raw).astype(np.float32), nan=0.0, posinf=1.0, neginf=0.0)
+        _repr[name] = field
+        _diag[name] = {
+            "ok": True,
+            "min": float(np.min(field)),
+            "max": float(np.max(field)),
+            "nanCount": int(np.isnan(field).sum()),
+        }
+    except Exception as e:
+        _diag[name] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+if _repr:
+    _FIELDS = np.stack([_repr.get(name, np.zeros_like(_Y, dtype=np.float32)) for name in ORDER], axis=0)
+else:
+    _FIELDS = np.zeros((len(ORDER),) + _Y.shape, dtype=np.float32)
+
+_diag_json = json.dumps(_diag)
 `);
-  const inPng = pyodide.globals.get("_in_png").toJs({ create_proxies: false });
-  await drawImageBytesTo("inCanvas", inPng);
-  const repMap = pyodide.globals.get("_rep_pngs").toJs({ dict_converter: Object.fromEntries, create_proxies: false });
-  for (const name of ORDER) {
-    await drawImageBytesTo(`rep-${name}`, repMap[name]);
+
+    const diag = getPyJson("_diag_json");
+    appState.repDiagnostics = diag;
+
+    const yProxy = pyodide.globals.get("_Y");
+    const y2d = yProxy.toJs({ create_proxies: false });
+    yProxy.destroy?.();
+    const height = y2d.length;
+    const width = y2d[0]?.length || 0;
+
+    ORDER.forEach((name) => {
+      const d = diag[name];
+      if (!d?.ok) {
+        setRepError(name, d?.error || "Representation failed");
+        setPanelMessage(`rep-${name}`, "Error", "error");
+        return;
+      }
+      const repProxy = pyodide.globals.get("_repr").get(name);
+      const rep2d = repProxy.toJs({ create_proxies: false });
+      repProxy.destroy?.();
+      renderRepresentation(name, rep2d, width, height);
+    });
+
+    await runReconstruction();
+    status("Done.", "ok");
+  } catch (e) {
+    console.error(e);
+    appState.fatalError = e.message;
+    status(`Image processing failed: ${e.message}`, "error");
+    setPanelMessage("outCanvas", "Error", "error");
+  } finally {
+    appState.processing = false;
+    updateDebugPanel();
   }
-  status("Computing reconstruction…");
-  await runReconstruction();
-  status("Done.");
 }
 
 async function runReconstruction() {
+  if (!fieldsReady()) {
+    setPanelMessage("outCanvas", "No image loaded");
+    return;
+  }
   const strategy = $("strategy").value;
   const beta = parseFloat($("beta").value);
   pyodide.globals.set("_w", weights);
   pyodide.globals.set("_t", toggles);
   pyodide.globals.set("_strategy", strategy);
   pyodide.globals.set("_beta", beta);
-  await pyodide.runPythonAsync(`
+  try {
+    await pyodide.runPythonAsync(`
 import numpy as np
 w = np.asarray(list(_w), dtype=np.float32)
 t = np.asarray(list(_t), dtype=np.float32)
-Y_hat = reconstruct(_FIELDS, strategy=_strategy, weights=w, toggles=t, beta=float(_beta))
-_rgb_bytes = png_bytes(reattach_chroma(Y_hat, _CBCR))
-_Y_HAT = Y_hat
+try:
+    Y_hat = COMBINERS[_strategy](_FIELDS, weights=w, toggles=t, beta=float(_beta))
+except Exception:
+    Y_hat = _Y
+_Y_HAT = np.nan_to_num(Y_hat.astype(np.float32), nan=0.0, posinf=1.0, neginf=0.0)
+_rgb = reattach_chroma(_Y_HAT, _CBCR)
 `);
-  const png = pyodide.globals.get("_rgb_bytes").toJs({ create_proxies: false });
-  await drawImageBytesTo("outCanvas", png);
+
+    const rgbProxy = pyodide.globals.get("_rgb");
+    const rgb = rgbProxy.toJs({ create_proxies: false });
+    rgbProxy.destroy?.();
+    const height = rgb.length;
+    const width = rgb[0]?.length || 0;
+    const flat = new Float32Array(width * height * 3);
+    let k = 0;
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const p = rgb[y][x] || [0, 0, 0];
+        flat[k++] = p[0];
+        flat[k++] = p[1];
+        flat[k++] = p[2];
+      }
+    }
+    const imageData = rgbFieldToImageData(flat, width, height);
+    drawImageDataToCanvas($("outCanvas"), imageData);
+    appState.reconstructionStatus = "ok";
+  } catch (e) {
+    console.error(e);
+    appState.reconstructionStatus = `error: ${e.message}`;
+    status(`Reconstruction failed, fallback shown: ${e.message}`, "error");
+    setPanelMessage("outCanvas", "Reconstruction error", "error");
+  }
+  updateDebugPanel();
 }
 
 async function runSymbolic() {
+  if (!fieldsReady()) {
+    setPanelMessage("symCanvas", "No image loaded");
+    return;
+  }
   const basis = $("basis").value;
   const degree = parseInt($("degree").value, 10);
   pyodide.globals.set("_basis", basis);
   pyodide.globals.set("_degree", degree);
-  status("Fitting symbolic basis expansion…");
-  await pyodide.runPythonAsync(`
+  status("Fitting symbolic basis expansion…", "info");
+  try {
+    await pyodide.runPythonAsync(`
 fit = fit_symbolic(_Y_HAT, basis=_basis, degree=int(_degree), max_k=int(_degree))
 _expr = expression_string(fit, top_n=24)
-_sym_png = png_bytes(to_uint8(fit["approx"]))
+_sym = np.nan_to_num(fit["approx"].astype(np.float32), nan=0.0, posinf=1.0, neginf=0.0)
 `);
-  $("exprOut").textContent = pyodide.globals.get("_expr");
-  const png = pyodide.globals.get("_sym_png").toJs({ create_proxies: false });
-  await drawImageBytesTo("symCanvas", png);
-  status("Symbolic expression updated.");
+    const exprProxy = pyodide.globals.get("_expr");
+    $("exprOut").textContent = exprProxy.toString();
+    exprProxy.destroy?.();
+
+    const symProxy = pyodide.globals.get("_sym");
+    const sym2d = symProxy.toJs({ create_proxies: false });
+    symProxy.destroy?.();
+    const height = sym2d.length;
+    const width = sym2d[0]?.length || 0;
+    const field1d = to1d(sym2d, width, height);
+    const { imageData } = scalarFieldToImageData(field1d, width, height);
+    drawImageDataToCanvas($("symCanvas"), imageData);
+    status("Symbolic expression updated.", "ok");
+  } catch (e) {
+    console.error(e);
+    status(`Symbolic export failed: ${e.message}`, "error");
+    setPanelMessage("symCanvas", "Symbolic error", "error");
+  }
 }
 
-// --- UI scaffolding ---
 function buildRepControls() {
   const container = $("reps");
   container.innerHTML = "";
@@ -178,7 +414,8 @@ function buildRepControls() {
         <label><input type="checkbox" data-i="${i}" class="tog" checked /> ${name}</label>
         <span class="eq">${EQS[name] || ""}</span>
       </div>
-      <canvas id="rep-${name}" width="200" height="200"></canvas>
+      <div id="rep-status-${name}" class="repStatus"></div>
+      <canvas id="rep-${name}" width="320" height="180"></canvas>
       <div class="w">w<sub>${i + 1}</sub>
         <input type="range" data-i="${i}" class="ws" min="0" max="2" step="0.01" value="${(1 / ORDER.length).toFixed(3)}" />
         <span class="wv" data-i="${i}">${(1 / ORDER.length).toFixed(2)}</span>
@@ -186,6 +423,8 @@ function buildRepControls() {
     `;
     container.appendChild(card);
   });
+  setAllPanelPlaceholders("No image loaded");
+
   container.querySelectorAll(".ws").forEach((el) => {
     el.addEventListener("input", debounce(async (e) => {
       const i = parseInt(e.target.dataset.i, 10);
@@ -204,12 +443,19 @@ function buildRepControls() {
 }
 
 function fieldsReady() {
-  return pyodide && pyodide.globals.get("_FIELDS") !== undefined;
+  try {
+    return Boolean(pyodide && pyodide.globals.get("_FIELDS"));
+  } catch {
+    return false;
+  }
 }
 
 function debounce(fn, ms) {
   let h = null;
-  return (...args) => { clearTimeout(h); h = setTimeout(() => fn(...args), ms); };
+  return (...args) => {
+    clearTimeout(h);
+    h = setTimeout(() => fn(...args), ms);
+  };
 }
 
 function refreshWeightDisplays() {
@@ -222,6 +468,38 @@ function refreshWeightDisplays() {
     const i = parseInt(el.dataset.i, 10);
     el.checked = toggles[i] > 0;
   });
+}
+
+async function handleFileSelection(file) {
+  if (!file) return;
+  if (!file.type.startsWith("image/")) {
+    const message = `Unsupported file type: ${file.type || "unknown"}`;
+    status(message, "error");
+    appState.fatalError = message;
+    setAllPanelPlaceholders("Upload an image file");
+    updateDebugPanel();
+    return;
+  }
+  if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+    const message = `File is too large (${(file.size / (1024 * 1024)).toFixed(1)}MB). Max ${MAX_UPLOAD_MB}MB.`;
+    status(message, "error");
+    appState.fatalError = message;
+    setAllPanelPlaceholders("File too large");
+    updateDebugPanel();
+    return;
+  }
+
+  try {
+    await drawUploadedPreview(file);
+    const bytes = await imageBytesFromFile(file);
+    await loadImageBytes(bytes);
+  } catch (e) {
+    console.error(e);
+    appState.fatalError = e.message;
+    status(`Failed to load image: ${e.message}`, "error");
+    setAllPanelPlaceholders("Image load failed");
+    updateDebugPanel();
+  }
 }
 
 function bindGlobalControls() {
@@ -242,19 +520,26 @@ function bindGlobalControls() {
     if (fieldsReady()) await runReconstruction();
   });
   $("file").addEventListener("change", async (e) => {
-    const f = e.target.files[0]; if (!f) return;
-    const bytes = await imageBytesFromFile(f);
-    await loadImageBytes(bytes);
+    await handleFileSelection(e.target.files?.[0]);
   });
   $("useDemo").addEventListener("click", async () => {
-    status("Generating synthetic demo image…");
-    await pyodide.runPythonAsync(`
+    status("Generating synthetic demo image…", "info");
+    try {
+      await pyodide.runPythonAsync(`
 generate_demo("/tmp/demo.png", size=192)
-with open("/tmp/demo.png","rb") as f:
+with open("/tmp/demo.png", "rb") as f:
     _bb = f.read()
 `);
-    const bytes = pyodide.globals.get("_bb").toJs({ create_proxies: false });
-    await loadImageBytes(bytes);
+      const bytesProxy = pyodide.globals.get("_bb");
+      const bytes = bytesProxy.toJs({ create_proxies: false });
+      bytesProxy.destroy?.();
+      const file = new File([bytes], "demo.png", { type: "image/png" });
+      await handleFileSelection(file);
+    } catch (e) {
+      console.error(e);
+      status(`Demo generation failed: ${e.message}`, "error");
+      updateDebugPanel();
+    }
   });
   $("symbolic").addEventListener("click", runSymbolic);
 }
@@ -262,10 +547,13 @@ with open("/tmp/demo.png","rb") as f:
 (async function main() {
   buildRepControls();
   bindGlobalControls();
+  updateDebugPanel();
   try {
     await bootPyodide();
   } catch (e) {
-    status(`Pyodide init failed: ${e.message}`);
+    appState.fatalError = e.message;
+    status(`Pyodide init failed: ${e.message}`, "error");
     console.error(e);
+    updateDebugPanel();
   }
 })();
