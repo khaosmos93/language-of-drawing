@@ -8,7 +8,7 @@ from typing import Tuple
 import numpy as np
 from PIL import Image
 
-MAX_SIDE = 384  # bounded for browser/Pyodide responsiveness
+MAX_SIDE = 256  # bounded for browser/Pyodide responsiveness
 
 
 def _resize_keep_aspect(img: Image.Image, max_side: int = MAX_SIDE) -> Image.Image:

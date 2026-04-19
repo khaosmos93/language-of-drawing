@@ -33,11 +33,20 @@ const EQS = {
 };
 
 const $ = (id) => document.getElementById(id);
-const status = (msg) => { $("status").textContent = msg; };
+const status = (msg, level = "info") => {
+  const el = $("status");
+  el.textContent = msg;
+  el.style.color = level === "error" ? "#ef4444" : level === "ok" ? "#6ee7b7" : "#f59e0b";
+  console.log(`[status:${level}]`, msg);
+};
+const err = (e) => {
+  const msg = (e && (e.message || String(e))) || "unknown error";
+  status(msg, "error");
+  console.error(e);
+};
 
 let pyodide = null;
-let fields = null;       // (9,H,W) Float32 — cached after first compute
-let rawCbCr = null;      // saved across reloads
+let haveFields = false;
 let weights = ORDER.map(() => 1.0 / ORDER.length);
 let toggles = ORDER.map(() => 1.0);
 
@@ -50,7 +59,7 @@ async function fetchText(url) {
 async function bootPyodide() {
   status("Loading Pyodide runtime…");
   pyodide = await loadPyodide({ indexURL: "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/" });
-  status("Loading scientific packages (numpy, scipy, scikit-image, pywavelets, pillow, matplotlib)…");
+  status("Loading numpy / scipy / scikit-image / pywavelets / pillow / matplotlib…");
   await pyodide.loadPackage([
     "numpy", "scipy", "scikit-image", "pywavelets", "pillow", "matplotlib",
   ]);
@@ -62,7 +71,7 @@ async function bootPyodide() {
     pyodide.FS.writeFile(`/home/pyodide/lod/core/${rel}`, src);
   }
   await pyodide.runPythonAsync(`
-import sys
+import sys, traceback
 if "/home/pyodide/lod" not in sys.path:
     sys.path.insert(0, "/home/pyodide/lod")
 import core
@@ -73,97 +82,146 @@ from core.normalize import to_uint8
 from core.pipeline import compute_fields, reconstruct
 from core.symbolic import fit_symbolic, expression_string
 from core.demo_image import generate_demo
-import numpy as np, io
+import numpy as np
 ORDER = R.ORDER
 REGISTRY = R.REGISTRY
-print("[pyodide] core ready, ORDER=", ORDER)
+print("[pyodide] ready. ORDER=", ORDER)
 `);
-  status("Ready. Pick an image or use the synthetic demo.");
+  status("Ready. Pick an image or use the synthetic demo.", "ok");
 }
 
 // --- canvas helpers ---
-function drawImageBytesTo(canvasId, bytes) {
-  return new Promise((resolve) => {
-    const blob = new Blob([bytes], { type: "image/png" });
-    const url = URL.createObjectURL(blob);
-    const img = new Image();
-    img.onload = () => {
-      const c = $(canvasId);
-      c.width = img.width; c.height = img.height;
-      c.getContext("2d").drawImage(img, 0, 0);
-      URL.revokeObjectURL(url);
-      resolve();
-    };
-    img.src = url;
+function drawBytesTo(canvasId, bytes) {
+  return new Promise((resolve, reject) => {
+    try {
+      const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      const blob = new Blob([u8], { type: "image/png" });
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => {
+        const c = $(canvasId);
+        if (!c) { URL.revokeObjectURL(url); return resolve(); }
+        c.width = img.width; c.height = img.height;
+        c.getContext("2d").drawImage(img, 0, 0);
+        URL.revokeObjectURL(url);
+        resolve();
+      };
+      img.onerror = (e) => { URL.revokeObjectURL(url); reject(new Error("image decode failed")); };
+      img.src = url;
+    } catch (e) { reject(e); }
   });
 }
 
-async function imageBytesFromFile(file) {
+async function fileToBytes(file) {
   const buf = await file.arrayBuffer();
   return new Uint8Array(buf);
 }
 
-// --- pipeline calls ---
-async function loadImageBytes(bytes) {
-  status("Computing 9 mathematical representations…");
-  pyodide.FS.writeFile("/tmp/in.bin", bytes);
-  await pyodide.runPythonAsync(`
-with open("/tmp/in.bin","rb") as f:
-    _b = f.read()
-Y, CbCr = load_image(_b)
-fields_np, raw = compute_fields(Y)
-_FIELDS = fields_np
-_RAW = raw
-_Y = Y
-_CBCR = CbCr
-_in_png = png_bytes((Y*255+0.5).astype("uint8"))
-_rep_pngs = {n: png_bytes(REGISTRY[n].visualize(raw[n])) for n in ORDER}
-`);
-  const inPng = pyodide.globals.get("_in_png").toJs({ create_proxies: false });
-  await drawImageBytesTo("inCanvas", inPng);
-  const repMap = pyodide.globals.get("_rep_pngs").toJs({ dict_converter: Object.fromEntries, create_proxies: false });
-  for (const name of ORDER) {
-    await drawImageBytesTo(`rep-${name}`, repMap[name]);
+function pyBytesToU8(name) {
+  // Pyodide returns Python bytes as a PyProxy; explicitly convert to a JS Uint8Array.
+  const proxy = pyodide.globals.get(name);
+  try {
+    if (proxy && typeof proxy.toJs === "function") {
+      return proxy.toJs();   // bytes -> Uint8Array
+    }
+    if (proxy && proxy.buffer) return new Uint8Array(proxy.buffer);
+    return new Uint8Array(proxy);
+  } finally {
+    if (proxy && typeof proxy.destroy === "function") proxy.destroy();
   }
-  status("Computing reconstruction…");
-  await runReconstruction();
-  status("Done.");
+}
+
+async function loadImageBytes(bytes) {
+  haveFields = false;
+  try {
+    status("Decoding image and computing 9 mathematical representations…");
+    pyodide.FS.writeFile("/tmp/in.bin", bytes);
+    await pyodide.runPythonAsync(`
+try:
+    with open("/tmp/in.bin","rb") as f:
+        _b = f.read()
+    Y, CbCr = load_image(_b)
+    fields_np, raw = compute_fields(Y)
+    _FIELDS = fields_np; _RAW = raw; _Y = Y; _CBCR = CbCr
+    _in_png = png_bytes((Y*255+0.5).astype("uint8"))
+    _rep_pngs_list = [png_bytes(REGISTRY[n].visualize(raw[n])) for n in ORDER]
+    _err = None
+except Exception as _e:
+    import traceback
+    _err = traceback.format_exc()
+`);
+    const errMsg = pyodide.globals.get("_err");
+    if (errMsg) { throw new Error(errMsg.toString()); }
+
+    await drawBytesTo("inCanvas", pyBytesToU8("_in_png"));
+    const listProxy = pyodide.globals.get("_rep_pngs_list");
+    const n = listProxy.length;
+    for (let i = 0; i < n; i++) {
+      const item = listProxy.get(i);
+      const u8 = item.toJs();
+      await drawBytesTo(`rep-${ORDER[i]}`, u8);
+      if (item.destroy) item.destroy();
+    }
+    if (listProxy.destroy) listProxy.destroy();
+
+    haveFields = true;
+    status("Computing reconstruction…");
+    await runReconstruction();
+    status("Done — adjust sliders to explore.", "ok");
+  } catch (e) { err(e); }
 }
 
 async function runReconstruction() {
-  const strategy = $("strategy").value;
-  const beta = parseFloat($("beta").value);
-  pyodide.globals.set("_w", weights);
-  pyodide.globals.set("_t", toggles);
-  pyodide.globals.set("_strategy", strategy);
-  pyodide.globals.set("_beta", beta);
-  await pyodide.runPythonAsync(`
-import numpy as np
-w = np.asarray(list(_w), dtype=np.float32)
-t = np.asarray(list(_t), dtype=np.float32)
-Y_hat = reconstruct(_FIELDS, strategy=_strategy, weights=w, toggles=t, beta=float(_beta))
-_rgb_bytes = png_bytes(reattach_chroma(Y_hat, _CBCR))
-_Y_HAT = Y_hat
+  if (!haveFields) return;
+  try {
+    const strategy = $("strategy").value;
+    const beta = parseFloat($("beta").value);
+    pyodide.globals.set("_w", weights);
+    pyodide.globals.set("_t", toggles);
+    pyodide.globals.set("_strategy", strategy);
+    pyodide.globals.set("_beta", beta);
+    await pyodide.runPythonAsync(`
+try:
+    w = np.asarray(list(_w), dtype=np.float32)
+    t = np.asarray(list(_t), dtype=np.float32)
+    Y_hat = reconstruct(_FIELDS, strategy=_strategy, weights=w, toggles=t, beta=float(_beta))
+    _rgb_bytes = png_bytes(reattach_chroma(Y_hat, _CBCR))
+    _Y_HAT = Y_hat
+    _err = None
+except Exception as _e:
+    import traceback
+    _err = traceback.format_exc()
 `);
-  const png = pyodide.globals.get("_rgb_bytes").toJs({ create_proxies: false });
-  await drawImageBytesTo("outCanvas", png);
+    const errMsg = pyodide.globals.get("_err");
+    if (errMsg) throw new Error(errMsg.toString());
+    await drawBytesTo("outCanvas", pyBytesToU8("_rgb_bytes"));
+  } catch (e) { err(e); }
 }
 
 async function runSymbolic() {
-  const basis = $("basis").value;
-  const degree = parseInt($("degree").value, 10);
-  pyodide.globals.set("_basis", basis);
-  pyodide.globals.set("_degree", degree);
-  status("Fitting symbolic basis expansion…");
-  await pyodide.runPythonAsync(`
-fit = fit_symbolic(_Y_HAT, basis=_basis, degree=int(_degree), max_k=int(_degree))
-_expr = expression_string(fit, top_n=24)
-_sym_png = png_bytes(to_uint8(fit["approx"]))
+  if (!haveFields) { status("Compute a reconstruction first.", "error"); return; }
+  try {
+    const basis = $("basis").value;
+    const degree = parseInt($("degree").value, 10);
+    pyodide.globals.set("_basis", basis);
+    pyodide.globals.set("_degree", degree);
+    status("Fitting symbolic basis expansion…");
+    await pyodide.runPythonAsync(`
+try:
+    fit = fit_symbolic(_Y_HAT, basis=_basis, degree=int(_degree), max_k=int(_degree))
+    _expr = expression_string(fit, top_n=24)
+    _sym_png = png_bytes(to_uint8(fit["approx"]))
+    _err = None
+except Exception as _e:
+    import traceback
+    _err = traceback.format_exc()
 `);
-  $("exprOut").textContent = pyodide.globals.get("_expr");
-  const png = pyodide.globals.get("_sym_png").toJs({ create_proxies: false });
-  await drawImageBytesTo("symCanvas", png);
-  status("Symbolic expression updated.");
+    const errMsg = pyodide.globals.get("_err");
+    if (errMsg) throw new Error(errMsg.toString());
+    $("exprOut").textContent = pyodide.globals.get("_expr");
+    await drawBytesTo("symCanvas", pyBytesToU8("_sym_png"));
+    status("Symbolic expression updated.", "ok");
+  } catch (e) { err(e); }
 }
 
 // --- UI scaffolding ---
@@ -191,20 +249,16 @@ function buildRepControls() {
       const i = parseInt(e.target.dataset.i, 10);
       weights[i] = parseFloat(e.target.value);
       container.querySelector(`.wv[data-i="${i}"]`).textContent = weights[i].toFixed(2);
-      if (fieldsReady()) await runReconstruction();
-    }, 60));
+      await runReconstruction();
+    }, 80));
   });
   container.querySelectorAll(".tog").forEach((el) => {
     el.addEventListener("change", async (e) => {
       const i = parseInt(e.target.dataset.i, 10);
       toggles[i] = e.target.checked ? 1.0 : 0.0;
-      if (fieldsReady()) await runReconstruction();
+      await runReconstruction();
     });
   });
-}
-
-function fieldsReady() {
-  return pyodide && pyodide.globals.get("_FIELDS") !== undefined;
 }
 
 function debounce(fn, ms) {
@@ -225,38 +279,43 @@ function refreshWeightDisplays() {
 }
 
 function bindGlobalControls() {
-  $("strategy").addEventListener("change", () => fieldsReady() && runReconstruction());
+  $("strategy").addEventListener("change", runReconstruction);
   $("beta").addEventListener("input", debounce((e) => {
     $("betaV").textContent = parseFloat(e.target.value).toFixed(1);
-    if (fieldsReady()) runReconstruction();
-  }, 60));
+    runReconstruction();
+  }, 80));
   $("perturb").addEventListener("click", async () => {
     weights = weights.map((w) => Math.max(0, Math.min(2, w + (Math.random() - 0.5) * 0.4)));
     refreshWeightDisplays();
-    if (fieldsReady()) await runReconstruction();
+    await runReconstruction();
   });
   $("reset").addEventListener("click", async () => {
     weights = ORDER.map(() => 1.0 / ORDER.length);
     toggles = ORDER.map(() => 1.0);
     refreshWeightDisplays();
-    if (fieldsReady()) await runReconstruction();
+    await runReconstruction();
   });
   $("file").addEventListener("change", async (e) => {
     const f = e.target.files[0]; if (!f) return;
-    const bytes = await imageBytesFromFile(f);
+    const bytes = await fileToBytes(f);
     await loadImageBytes(bytes);
   });
   $("useDemo").addEventListener("click", async () => {
-    status("Generating synthetic demo image…");
-    await pyodide.runPythonAsync(`
+    try {
+      status("Generating synthetic demo image…");
+      await pyodide.runPythonAsync(`
 generate_demo("/tmp/demo.png", size=192)
 with open("/tmp/demo.png","rb") as f:
     _bb = f.read()
 `);
-    const bytes = pyodide.globals.get("_bb").toJs({ create_proxies: false });
-    await loadImageBytes(bytes);
+      const u8 = pyBytesToU8("_bb");
+      await loadImageBytes(u8);
+    } catch (e) { err(e); }
   });
   $("symbolic").addEventListener("click", runSymbolic);
+
+  window.addEventListener("unhandledrejection", (e) => err(e.reason));
+  window.addEventListener("error", (e) => err(e.error || e.message));
 }
 
 (async function main() {
@@ -264,8 +323,5 @@ with open("/tmp/demo.png","rb") as f:
   bindGlobalControls();
   try {
     await bootPyodide();
-  } catch (e) {
-    status(`Pyodide init failed: ${e.message}`);
-    console.error(e);
-  }
+  } catch (e) { err(e); }
 })();
