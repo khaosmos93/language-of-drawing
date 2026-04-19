@@ -310,6 +310,23 @@ function renderRepresentation(name, field2d, width, height) {
   appState.repDiagnostics[name] = { ok: true, min, max, nanCount };
 }
 
+function renderRepresentationRgb(name, rgb3d, width, height, diag) {
+  const flat = new Float32Array(width * height * 3);
+  let k = 0;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const p = rgb3d[y][x] || [0, 0, 0];
+      flat[k++] = p[0];
+      flat[k++] = p[1];
+      flat[k++] = p[2];
+    }
+  }
+  const imageData = rgbFieldToImageData(flat, width, height);
+  drawImageDataToCanvas($(`rep-${name}`), imageData);
+  setRepError(name, "");
+  appState.repDiagnostics[name] = { ...diag };
+}
+
 async function loadImageBytes(bytes) {
   appState.processing = true;
   appState.fatalError = null;
@@ -331,13 +348,16 @@ Y, CbCr = load_image(_b)
 _Y = Y.astype(np.float32)
 _CBCR = CbCr.astype(np.float32)
 _repr = {}
+_repr_rgb = {}
 _diag = {}
 for name in ORDER:
     try:
         rep = REGISTRY[name]
         raw = rep.compute(_Y)
         field = np.nan_to_num(rep.to_field(raw).astype(np.float32), nan=0.0, posinf=1.0, neginf=0.0)
+        color = np.nan_to_num(rep.visualize(raw).astype(np.float32), nan=0.0, posinf=255.0, neginf=0.0)
         _repr[name] = field
+        _repr_rgb[name] = color
         _diag[name] = {
             "ok": True,
             "min": float(np.min(field)),
@@ -373,10 +393,10 @@ _diag_json = json.dumps(_diag)
         setPanelMessage(`rep-${name}`, "Error", "error");
         return;
       }
-      const repProxy = pyodide.globals.get("_repr").get(name);
+      const repProxy = pyodide.globals.get("_repr_rgb").get(name);
       const rep2d = repProxy.toJs({ create_proxies: false });
       repProxy.destroy?.();
-      renderRepresentation(name, rep2d, width, height);
+      renderRepresentationRgb(name, rep2d, width, height, d);
     });
     setStage("representations", "done");
 
