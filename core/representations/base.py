@@ -24,8 +24,7 @@ class Representation:
     def visualize(self, raw: dict[str, Any]) -> np.ndarray:
         """Default colorization of the field via matplotlib colormap."""
         f = self.to_field(raw)
-        registry = matplotlib.colormaps
-        cmap = registry.get_cmap(self.cmap) if hasattr(registry, "get_cmap") else registry[self.cmap]
+        cmap = matplotlib.colormaps.get_cmap(self.cmap)
         rgba = cmap(np.clip(f, 0, 1))
         return (rgba[..., :3] * 255 + 0.5).astype(np.uint8)
 
