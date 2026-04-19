@@ -310,6 +310,44 @@ function renderRepresentation(name, field2d, width, height) {
   appState.repDiagnostics[name] = { ok: true, min, max, nanCount };
 }
 
+function renderRepresentationColor(name, rgb3d, width, height, fallback2d = null) {
+  const flat = new Float32Array(width * height * 3);
+  let nanCount = 0;
+  let min = Infinity;
+  let max = -Infinity;
+  let k = 0;
+  for (let y = 0; y < height; y += 1) {
+    const row = rgb3d[y] || [];
+    for (let x = 0; x < width; x += 1) {
+      const px = row[x] || [0, 0, 0];
+      for (let c = 0; c < 3; c += 1) {
+        const v = Number(px[c] ?? 0);
+        if (!Number.isFinite(v)) {
+          nanCount += 1;
+          flat[k++] = 0;
+          continue;
+        }
+        if (v < min) min = v;
+        if (v > max) max = v;
+        flat[k++] = v;
+      }
+    }
+  }
+  drawImageDataToCanvas($(`rep-${name}`), rgbFieldToImageData(flat, width, height));
+  setRepError(name, "");
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    if (fallback2d) {
+      const fallback = sanitizeNumericArray(to1d(fallback2d, width, height));
+      const normalized = scalarFieldToImageData(fallback, width, height);
+      appState.repDiagnostics[name] = { ok: true, min: normalized.min, max: normalized.max, nanCount };
+      return;
+    }
+    min = 0;
+    max = 0;
+  }
+  appState.repDiagnostics[name] = { ok: true, min, max, nanCount };
+}
+
 async function loadImageBytes(bytes) {
   appState.processing = true;
   appState.fatalError = null;
@@ -331,13 +369,16 @@ Y, CbCr = load_image(_b)
 _Y = Y.astype(np.float32)
 _CBCR = CbCr.astype(np.float32)
 _repr = {}
+_viz = {}
 _diag = {}
 for name in ORDER:
     try:
         rep = REGISTRY[name]
         raw = rep.compute(_Y)
         field = np.nan_to_num(rep.to_field(raw).astype(np.float32), nan=0.0, posinf=1.0, neginf=0.0)
+        viz = rep.visualize(raw)
         _repr[name] = field
+        _viz[name] = np.nan_to_num(viz.astype(np.float32), nan=0.0, posinf=255.0, neginf=0.0)
         _diag[name] = {
             "ok": True,
             "min": float(np.min(field)),
@@ -376,7 +417,14 @@ _diag_json = json.dumps(_diag)
       const repProxy = pyodide.globals.get("_repr").get(name);
       const rep2d = repProxy.toJs({ create_proxies: false });
       repProxy.destroy?.();
-      renderRepresentation(name, rep2d, width, height);
+      const vizProxy = pyodide.globals.get("_viz").get(name);
+      const viz = vizProxy.toJs({ create_proxies: false });
+      vizProxy.destroy?.();
+      if (Array.isArray(viz) && Array.isArray(viz[0]) && Array.isArray(viz[0][0])) {
+        renderRepresentationColor(name, viz, width, height, rep2d);
+      } else {
+        renderRepresentation(name, rep2d, width, height);
+      }
     });
     setStage("representations", "done");
 
