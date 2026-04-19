@@ -1,0 +1,14 @@
+{
+  "name": "language-of-drawing-web",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "vite build && rm -rf dist/core && cp -R core dist/core",
+    "preview": "vite preview --host"
+  },
+  "devDependencies": {
+    "vite": "^5.4.11"
+  }
+}
