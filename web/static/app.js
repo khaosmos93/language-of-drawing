@@ -41,6 +41,7 @@ const EQS = {
 
 const MAX_UPLOAD_MB = 15;
 const MAX_PREVIEW_BOX = 360;
+const DEFAULT_MAX_SIDE = 384;
 
 const $ = (id) => document.getElementById(id);
 const status = (msg, level = "info") => {
@@ -54,6 +55,8 @@ let coreBasePath = "core";
 let coreLoadMode = "http";
 let weights = ORDER.map(() => 1.0 / ORDER.length);
 let toggles = ORDER.map(() => 1.0);
+let originalImageBytes = null;
+let originalFileName = "image";
 const STAGES = [
   { id: "runtime", label: "1) Pyodide runtime boot" },
   { id: "packages", label: "2) Scientific packages load" },
@@ -307,7 +310,7 @@ function renderRepresentation(name, rgbFlat, width, height) {
   setRepError(name, "");
 }
 
-async function loadImageBytes(bytes) {
+async function loadImageBytes(bytes, maxSide = DEFAULT_MAX_SIDE) {
   appState.processing = true;
   appState.fatalError = null;
   appState.reconstructionStatus = "processing";
@@ -320,11 +323,12 @@ async function loadImageBytes(bytes) {
   try {
     setStage("image", "active");
     pyodide.FS.writeFile("/tmp/in.bin", bytes);
+    pyodide.globals.set("_max_side", maxSide);
     await pyodide.runPythonAsync(`
 import json, traceback
 with open("/tmp/in.bin", "rb") as f:
     _b = f.read()
-Y, CbCr = load_image(_b)
+Y, CbCr = load_image(_b, max_side=int(_max_side))
 _Y = Y.astype(np.float32)
 _CBCR = CbCr.astype(np.float32)
 _repr = {}
@@ -382,6 +386,7 @@ _diag_json = json.dumps(_diag)
     setStage("reconstruction", "active");
     await runReconstruction();
     setStage("reconstruction", "done");
+    enableSaveButtons(true);
     status("Done.", "ok");
   } catch (e) {
     console.error(e);
@@ -490,6 +495,9 @@ function buildRepControls() {
       </div>
       <div id="rep-status-${name}" class="repStatus"></div>
       <canvas id="rep-${name}" width="320" height="180"></canvas>
+      <div class="canvasActions">
+        <button class="saveBtn saveRep" data-name="${name}" disabled>⬇ Save PNG</button>
+      </div>
       <div class="w">w<sub>${i + 1}</sub>
         <input type="range" data-i="${i}" class="ws" min="0" max="2" step="0.01" value="${(1 / ORDER.length).toFixed(3)}" />
         <span class="wv" data-i="${i}">${(1 / ORDER.length).toFixed(2)}</span>
@@ -532,6 +540,30 @@ function debounce(fn, ms) {
   };
 }
 
+function downloadCanvas(canvas, filename = "image.png") {
+  canvas.toBlob((blob) => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }, "image/png");
+}
+
+function enableSaveButtons(enabled) {
+  ["saveInput", "saveOutput", "saveSym", "reprocess"].forEach((id) => {
+    const el = $(id);
+    if (el) el.disabled = !enabled;
+  });
+  document.querySelectorAll(".saveRep").forEach((el) => {
+    el.disabled = !enabled;
+  });
+}
+
 function refreshWeightDisplays() {
   document.querySelectorAll(".ws").forEach((el) => {
     const i = parseInt(el.dataset.i, 10);
@@ -566,7 +598,10 @@ async function handleFileSelection(file) {
   try {
     await drawUploadedPreview(file);
     const bytes = await imageBytesFromFile(file);
-    await loadImageBytes(bytes);
+    originalImageBytes = bytes;
+    originalFileName = file.name.replace(/\.[^/.]+$/, "") || "image";
+    const maxSide = parseInt($("processingSize")?.value || DEFAULT_MAX_SIDE, 10);
+    await loadImageBytes(bytes, maxSide);
   } catch (e) {
     console.error(e);
     appState.fatalError = e.message;
@@ -616,6 +651,30 @@ with open("/tmp/demo.png", "rb") as f:
     }
   });
   $("symbolic").addEventListener("click", runSymbolic);
+
+  $("saveInput").addEventListener("click", () =>
+    downloadCanvas($("inCanvas"), `${originalFileName || "input"}.png`)
+  );
+  $("saveOutput").addEventListener("click", () =>
+    downloadCanvas($("outCanvas"), `${originalFileName || "image"}_reconstruction.png`)
+  );
+  $("saveSym").addEventListener("click", () =>
+    downloadCanvas($("symCanvas"), `${originalFileName || "image"}_symbolic.png`)
+  );
+
+  document.addEventListener("click", (e) => {
+    if (e.target.classList.contains("saveRep")) {
+      const name = e.target.dataset.name;
+      downloadCanvas($(`rep-${name}`), `${originalFileName || "image"}_rep_${name}.png`);
+    }
+  });
+
+  $("reprocess").addEventListener("click", async () => {
+    if (!originalImageBytes) return;
+    const maxSide = parseInt($("processingSize").value, 10);
+    enableSaveButtons(false);
+    await loadImageBytes(originalImageBytes, maxSide);
+  });
 }
 
 (async function main() {
