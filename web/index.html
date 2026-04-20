@@ -26,6 +26,19 @@
     <input type="file" id="file" accept="image/*" />
     <button id="useDemo">Use synthetic demo</button>
     <div class="canvasWrap"><canvas id="inCanvas"></canvas></div>
+    <div class="canvasActions">
+      <button id="saveInput" class="saveBtn" disabled>⬇ Save PNG</button>
+      <label class="hiresLabel">Resolution
+        <select id="processingSize">
+          <option value="384" selected>384px (standard)</option>
+          <option value="512">512px</option>
+          <option value="768">768px</option>
+          <option value="1024">1024px (hi-res)</option>
+          <option value="2048">2048px (very hi-res)</option>
+        </select>
+      </label>
+      <button id="reprocess" disabled>Re-process</button>
+    </div>
   </div>
   <div class="card">
     <h2>Reconstruction Î(x,y)</h2>
@@ -42,6 +55,9 @@
       <button id="reset">Reset weights</button>
     </div>
     <div class="canvasWrap"><canvas id="outCanvas"></canvas></div>
+    <div class="canvasActions">
+      <button id="saveOutput" class="saveBtn" disabled>⬇ Save PNG</button>
+    </div>
   </div>
 </section>
 
@@ -61,6 +77,9 @@
   </div>
   <pre id="exprOut" class="expr"></pre>
   <div class="canvasWrap"><canvas id="symCanvas"></canvas></div>
+  <div class="canvasActions">
+    <button id="saveSym" class="saveBtn" disabled>⬇ Save PNG</button>
+  </div>
 </section>
 
 <section class="card debugCard">
