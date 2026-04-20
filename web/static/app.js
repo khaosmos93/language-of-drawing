@@ -3,7 +3,7 @@ import {
   drawImageDataToCanvas,
   drawImageToCanvas,
   fitImageInsideBox,
-  sanitizeNumericArray,
+  flattenRgb3d,
   scalarFieldToImageData,
   rgbFieldToImageData,
 } from "./canvasUtils.js";
@@ -301,13 +301,10 @@ async function imageBytesFromFile(file) {
   return new Uint8Array(buf);
 }
 
-function renderRepresentation(name, field2d, width, height) {
-  const flattened = sanitizeNumericArray(to1d(field2d, width, height));
-  const nanCount = flattened.reduce((acc, v) => acc + (Number.isFinite(v) ? 0 : 1), 0);
-  const { imageData, min, max } = scalarFieldToImageData(flattened, width, height);
+function renderRepresentation(name, rgbFlat, width, height) {
+  const imageData = rgbFieldToImageData(rgbFlat, width, height);
   drawImageDataToCanvas($(`rep-${name}`), imageData);
   setRepError(name, "");
-  appState.repDiagnostics[name] = { ok: true, min, max, nanCount };
 }
 
 async function loadImageBytes(bytes) {
@@ -331,6 +328,7 @@ Y, CbCr = load_image(_b)
 _Y = Y.astype(np.float32)
 _CBCR = CbCr.astype(np.float32)
 _repr = {}
+_repr_vis = {}
 _diag = {}
 for name in ORDER:
     try:
@@ -338,6 +336,7 @@ for name in ORDER:
         raw = rep.compute(_Y)
         field = np.nan_to_num(rep.to_field(raw).astype(np.float32), nan=0.0, posinf=1.0, neginf=0.0)
         _repr[name] = field
+        _repr_vis[name] = rep.visualize(raw)
         _diag[name] = {
             "ok": True,
             "min": float(np.min(field)),
@@ -373,10 +372,10 @@ _diag_json = json.dumps(_diag)
         setPanelMessage(`rep-${name}`, "Error", "error");
         return;
       }
-      const repProxy = pyodide.globals.get("_repr").get(name);
-      const rep2d = repProxy.toJs({ create_proxies: false });
+      const repProxy = pyodide.globals.get("_repr_vis").get(name);
+      const rgb3d = repProxy.toJs({ create_proxies: false });
       repProxy.destroy?.();
-      renderRepresentation(name, rep2d, width, height);
+      renderRepresentation(name, flattenRgb3d(rgb3d, width, height), width, height);
     });
     setStage("representations", "done");
 
@@ -427,17 +426,7 @@ _rgb = reattach_chroma(_Y_HAT, _CBCR)
     rgbProxy.destroy?.();
     const height = rgb.length;
     const width = rgb[0]?.length || 0;
-    const flat = new Float32Array(width * height * 3);
-    let k = 0;
-    for (let y = 0; y < height; y += 1) {
-      for (let x = 0; x < width; x += 1) {
-        const p = rgb[y][x] || [0, 0, 0];
-        flat[k++] = p[0];
-        flat[k++] = p[1];
-        flat[k++] = p[2];
-      }
-    }
-    const imageData = rgbFieldToImageData(flat, width, height);
+    const imageData = rgbFieldToImageData(flattenRgb3d(rgb, width, height), width, height);
     drawImageDataToCanvas($("outCanvas"), imageData);
     appState.reconstructionStatus = "ok";
   } catch (e) {

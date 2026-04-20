@@ -32,6 +32,20 @@ function clampByte(v) {
   return Math.max(0, Math.min(255, Math.round(v)));
 }
 
+export function flattenRgb3d(rgb3d, width, height) {
+  const flat = new Float32Array(width * height * 3);
+  let k = 0;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const p = rgb3d[y][x] || [0, 0, 0];
+      flat[k++] = p[0];
+      flat[k++] = p[1];
+      flat[k++] = p[2];
+    }
+  }
+  return flat;
+}
+
 export function scalarFieldToImageData(field2d, width, height) {
   const { normalized, min, max } = normalizeArray(field2d);
   const rgba = new Uint8ClampedArray(width * height * 4);
